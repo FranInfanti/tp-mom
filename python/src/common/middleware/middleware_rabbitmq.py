@@ -1,6 +1,5 @@
 import pika
-import random
-import string
+import pika.exceptions
 
 from .middleware import (
     MessageMiddlewareQueue,
@@ -8,7 +7,6 @@ from .middleware import (
     MessageMiddlewareMessageError,
     MessageMiddlewareDisconnectedError,
     MessageMiddlewareCloseError,
-    MessageMiddlewareDeleteError,
 )
 
 class MessageMiddlewareQueueRabbitMQ(MessageMiddlewareQueue):
@@ -26,7 +24,7 @@ class MessageMiddlewareQueueRabbitMQ(MessageMiddlewareQueue):
         self.chan.queue_declare(queue_name)
 
     def start_consuming(self, on_message_callback):
-        def callback(ch, method, properties, body):
+        def callback(ch, method, _, body):
             on_message_callback(
                 message=body, 
                 ack=lambda: ch.basic_ack(delivery_tag=method.delivery_tag),
@@ -56,7 +54,7 @@ class MessageMiddlewareQueueRabbitMQ(MessageMiddlewareQueue):
         try:
             self.chan.basic_publish(
                 exchange='',
-                routing_key=self.queue_name,
+                routing_key=self.queue_name, # the routing key is the queue name
                 body=message
             )
         except pika.exceptions.AMQPConnectionError:
@@ -73,4 +71,69 @@ class MessageMiddlewareQueueRabbitMQ(MessageMiddlewareQueue):
 class MessageMiddlewareExchangeRabbitMQ(MessageMiddlewareExchange):
     
     def __init__(self, host, exchange_name, routing_keys):
-        pass
+        self.exchange_name = exchange_name
+        self.routing_keys = routing_keys
+
+        self.conn = pika.BlockingConnection(pika.ConnectionParameters(host))
+        self.chan = self.conn.channel()
+
+        # declare the exchange point
+        self.chan.exchange_declare(exchange=exchange_name, exchange_type='direct')
+
+    def start_consuming(self, on_message_callback):
+        def callback(ch, method, _, body):
+            on_message_callback(
+                message=body, 
+                ack=lambda: ch.basic_ack(delivery_tag=method.delivery_tag),
+                nack=lambda: ch.basic_nack(delivery_tag=method.delivery_tag)
+            )
+
+        try:
+            result = self.chan.queue_declare(queue='', exclusive=True)
+            self.queue_name = result.method.queue
+
+            for routing_key in self.routing_keys:
+                self.chan.queue_bind(
+                    queue=self.queue_name,
+                    exchange=self.exchange_name,
+                    routing_key=routing_key
+                )
+
+            self.chan.basic_consume(
+                queue=self.queue_name,
+                on_message_callback=callback,
+                auto_ack=False
+            )
+
+            self.chan.start_consuming()
+        except pika.exceptions.AMQPConnectionError:
+            raise MessageMiddlewareDisconnectedError()
+        except Exception:
+            raise MessageMiddlewareMessageError()
+
+    def stop_consuming(self):
+        try:
+            self.chan.stop_consuming()
+        except pika.exceptions.AMQPConnectionError:
+            raise MessageMiddlewareDisconnectedError()
+
+    def send(self, message):
+        try:
+            for routing_key in self.routing_keys:
+                self.chan.basic_publish(
+                    exchange=self.exchange_name,
+                    routing_key=routing_key,
+                    body=message
+                )
+            
+            self.conn.process_data_events()
+        except pika.exceptions.AMQPConnectionError:
+            raise MessageMiddlewareDisconnectedError()
+        except Exception:
+            raise MessageMiddlewareMessageError()
+
+    def close(self):
+        try:
+            self.conn.close()
+        except Exception:
+            raise MessageMiddlewareCloseError()
