@@ -20,7 +20,7 @@ class MessageMiddlewareQueueRabbitMQ(MessageMiddlewareQueue):
         # defines a chan that allows to communicate with RabbitMQ broker
         self.chan = self.conn.channel()
 
-        # declare the queue cause it might not exist yet
+        # both consumer and produced need the queue to exist
         self.chan.queue_declare(queue_name)
 
     def start_consuming(self, on_message_callback):
@@ -77,8 +77,21 @@ class MessageMiddlewareExchangeRabbitMQ(MessageMiddlewareExchange):
         self.conn = pika.BlockingConnection(pika.ConnectionParameters(host))
         self.chan = self.conn.channel()
 
-        # declare the exchange point
+        # both consumer and producer need the exchange to exist 
         self.chan.exchange_declare(exchange=exchange_name, exchange_type='direct')
+
+    def _declare_queue(self):
+        result = self.chan.queue_declare(queue='', exclusive=True)
+        queue = result.method.queue
+
+        for routing_key in self.routing_keys:
+            self.chan.queue_bind(
+                queue=queue,
+                exchange=self.exchange_name,
+                routing_key=routing_key
+            )
+
+        return queue
 
     def start_consuming(self, on_message_callback):
         def callback(ch, method, _, body):
@@ -89,18 +102,11 @@ class MessageMiddlewareExchangeRabbitMQ(MessageMiddlewareExchange):
             )
 
         try:
-            result = self.chan.queue_declare(queue='', exclusive=True)
-            self.queue_name = result.method.queue
-
-            for routing_key in self.routing_keys:
-                self.chan.queue_bind(
-                    queue=self.queue_name,
-                    exchange=self.exchange_name,
-                    routing_key=routing_key
-                )
+            # only the consumer needs to declare the queue
+            queue = self._declare_queue()
 
             self.chan.basic_consume(
-                queue=self.queue_name,
+                queue=queue,
                 on_message_callback=callback,
                 auto_ack=False
             )
@@ -120,13 +126,12 @@ class MessageMiddlewareExchangeRabbitMQ(MessageMiddlewareExchange):
     def send(self, message):
         try:
             for routing_key in self.routing_keys:
+                # the producer sends the message to the exchange, not the queue
                 self.chan.basic_publish(
                     exchange=self.exchange_name,
                     routing_key=routing_key,
                     body=message
                 )
-            
-            self.conn.process_data_events()
         except pika.exceptions.AMQPConnectionError:
             raise MessageMiddlewareDisconnectedError()
         except Exception:
