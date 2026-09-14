@@ -9,7 +9,21 @@ from .middleware import (
     MessageMiddlewareCloseError,
 )
 
-class MessageMiddlewareQueueRabbitMQ(MessageMiddlewareQueue):
+class MessageMiddlewareCommonRabbitMQ:
+
+    def stop_consuming(self):
+        try:
+            self.chan.stop_consuming()
+        except pika.exceptions.AMQPConnectionError:
+            raise MessageMiddlewareDisconnectedError()
+
+    def close(self):
+        try:
+            self.conn.close()
+        except Exception:
+            raise MessageMiddlewareCloseError()
+
+class MessageMiddlewareQueueRabbitMQ(MessageMiddlewareCommonRabbitMQ, MessageMiddlewareQueue):
 
     def __init__(self, host, queue_name):
         self.queue_name = queue_name
@@ -21,7 +35,7 @@ class MessageMiddlewareQueueRabbitMQ(MessageMiddlewareQueue):
         self.chan = self.conn.channel()
 
         # both consumer and produced need the queue to exist
-        self.chan.queue_declare(queue_name)
+        self.chan.queue_declare(queue=self.queue_name)
 
     def start_consuming(self, on_message_callback):
         def callback(ch, method, _, body):
@@ -45,15 +59,12 @@ class MessageMiddlewareQueueRabbitMQ(MessageMiddlewareQueue):
             raise MessageMiddlewareMessageError()
 
     def stop_consuming(self):
-        try:
-            self.chan.stop_consuming()
-        except pika.exceptions.AMQPConnectionError:
-            raise MessageMiddlewareDisconnectedError()
+        super().stop_consuming()
 
     def send(self, message):
         try:
             self.chan.basic_publish(
-                exchange='',
+                exchange='', # send to the default exchange
                 routing_key=self.queue_name, # the routing key is the queue name
                 body=message
             )
@@ -63,12 +74,9 @@ class MessageMiddlewareQueueRabbitMQ(MessageMiddlewareQueue):
             raise MessageMiddlewareMessageError()
 
     def close(self):
-        try:
-            self.conn.close()
-        except Exception:
-            raise MessageMiddlewareCloseError()
+        super().close()
 
-class MessageMiddlewareExchangeRabbitMQ(MessageMiddlewareExchange):
+class MessageMiddlewareExchangeRabbitMQ(MessageMiddlewareCommonRabbitMQ, MessageMiddlewareExchange):
     
     def __init__(self, host, exchange_name, routing_keys):
         self.exchange_name = exchange_name
@@ -81,10 +89,15 @@ class MessageMiddlewareExchangeRabbitMQ(MessageMiddlewareExchange):
         self.chan.exchange_declare(exchange=exchange_name, exchange_type='direct')
 
     def _declare_queue(self):
-        result = self.chan.queue_declare(queue='', exclusive=True)
+        result = self.chan.queue_declare(
+            queue='',
+            exclusive=True
+        )
+
         queue = result.method.queue
 
         for routing_key in self.routing_keys:
+            # binds the queue in the exchange with the routing key
             self.chan.queue_bind(
                 queue=queue,
                 exchange=self.exchange_name,
@@ -118,15 +131,12 @@ class MessageMiddlewareExchangeRabbitMQ(MessageMiddlewareExchange):
             raise MessageMiddlewareMessageError()
 
     def stop_consuming(self):
-        try:
-            self.chan.stop_consuming()
-        except pika.exceptions.AMQPConnectionError:
-            raise MessageMiddlewareDisconnectedError()
+        super().stop_consuming()
 
     def send(self, message):
         try:
             for routing_key in self.routing_keys:
-                # the producer sends the message to the exchange, not the queue
+                # the producer sends the message to the exchange, not the queue, with each routing key
                 self.chan.basic_publish(
                     exchange=self.exchange_name,
                     routing_key=routing_key,
@@ -138,7 +148,4 @@ class MessageMiddlewareExchangeRabbitMQ(MessageMiddlewareExchange):
             raise MessageMiddlewareMessageError()
 
     def close(self):
-        try:
-            self.conn.close()
-        except Exception:
-            raise MessageMiddlewareCloseError()
+        super().close()
